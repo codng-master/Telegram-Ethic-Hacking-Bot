@@ -1,0 +1,15 @@
+# Archivos de configuración local que contienen secretos
+config.env
+
+# Archivos de la base de datos y logs
+*.json
+*.log
+
+# Directorios y archivos generados por Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Archivos de entorno de desarrollo (si usas uno)
+.env
+venv/
