@@ -1,5 +1,5 @@
 # Archivos de configuración local que contienen secretos
-config.env
+configs.env
 
 # Archivos de la base de datos y logs
 *.json

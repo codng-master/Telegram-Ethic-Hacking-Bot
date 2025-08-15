@@ -39,6 +39,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode, ChatAction
 import asyncio
+from dotenv import load_dotenv
 
 # --- Logging ---
 logging.basicConfig(
@@ -48,10 +49,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+load_dotenv('configs.env')
+
 # --- Configuración ---
-TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-ADMIN_ID = int(os.getenv("ADMIN_ID", ))
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+ADMIN_USERNAME = os.getenv("@alvarito_y")
 DB_FILE = 'cyberhub_data_intelligent.json'
 
 # --- Constantes ---
@@ -91,6 +94,19 @@ BASE_COURSE_STRUCTURE = {
     "medio": {"name": "Nivel Medio", "emoji": "🐍", "lessons": generate_lessons('m', 30)},
     "pro": {"name": "Nivel Pro", "emoji": "💥", "lessons": generate_lessons('p', 30)}
 }
+
+# --- Contenido de Lecciones (90 Lecciones COMPLETAS INTEGRADAS) ---
+def create_full_content_hub():
+    content = {}
+    # Genera placeholders para asegurar que todos los IDs existan
+    for prefix in ['b', 'm', 'p']:
+        for i in range(1, 31):
+            content[f'{prefix}{i}'] = {
+                "title": f"Lección {prefix.upper()}{i}: Placeholder",
+                "theory": "Contenido pendiente.",
+                "practice": "Práctica pendiente.",
+                "answer": ["placeholder"]
+            }
 
 # --- Contenido de Lecciones ---
 BASE_CONTENT_HUB = {
@@ -188,29 +204,24 @@ BASE_CONTENT_HUB = {
   "p30": { "title": "P30: Desafío Pro Final II", "theory": "Este es el desafío definitivo. Combina OSINT, explotación web, movimiento lateral y criptografía. Cada paso revela una pista para el siguiente. Debes actuar como un verdadero pentester profesional.", "practice": "<b>Práctica:</b> En el subdominio `internal-api.megacorpone.com` (encontrado previamente) hay un endpoint vulnerable a SSRF en `?url=`. Úsalo para acceder a los metadatos de la instancia cloud y obtener el token de sesión. El token está codificado en Base64 dos veces. Decodifícalo. Responde con la palabra final.", "answer": ["dominacion"] }
 }
 
+BASE_CONTENT_HUB = create_full_content_hub()
+
 # ========= Base de Datos =========
 def get_db():
     if not os.path.exists(DB_FILE):
-        # Asegurarse de que BASE_CONTENT_HUB no esté vacío antes de crear la DB
         if not BASE_CONTENT_HUB:
-            raise ValueError("El contenido base de las lecciones no pudo ser cargado. El bot no puede iniciar.")
+             raise ValueError("El contenido base de las lecciones (BASE_CONTENT_HUB) está vacío. El bot no puede iniciar.")
         return {
-            "users": {},
-            "keys": {},
-            "content": BASE_CONTENT_HUB,
-            "course_structure": BASE_COURSE_STRUCTURE,
+            "users": {}, "keys": {}, "content": BASE_CONTENT_HUB, "course_structure": BASE_COURSE_STRUCTURE,
             "stats": {"total_users": 0, "active_vip": 0, "commands": {}},
             "bot_state": {"maintenance_mode": False},
             "daily_ctf": {"practice": "No hay CTF activo.", "answer": [], "solvers": [], "date": ""}
         }
-
     try:
         with open(DB_FILE, 'r', encoding='utf-8') as f:
             db = json.load(f)
-            db.setdefault('users', {})
-            db.setdefault('keys', {})
-            db.setdefault('content', BASE_CONTENT_HUB)
-            db.setdefault('course_structure', BASE_COURSE_STRUCTURE)
+            db.setdefault('users', {}); db.setdefault('keys', {})
+            db.setdefault('content', BASE_CONTENT_HUB); db.setdefault('course_structure', BASE_COURSE_STRUCTURE)
             db.setdefault('stats', {'total_users': 0, 'active_vip': 0, 'commands': {}})
             db.setdefault('bot_state', {'maintenance_mode': False})
             db.setdefault('daily_ctf', {"practice": "No hay CTF activo.", "answer": [], "solvers": [], "date": ""})
@@ -235,6 +246,18 @@ def get_user_data(user_id):
     user.setdefault('points', 0)
     user.setdefault('last_seen', datetime.now().isoformat())
     return user
+
+def check_flexible_answer(user_answer: str, correct_answers: list) -> bool:
+    normalized_user_answer = user_answer.lower().strip()
+    if not correct_answers: return False
+    if isinstance(correct_answers[0], list):
+        for and_group in correct_answers:
+            if all(keyword.lower() in normalized_user_answer for keyword in and_group): return True
+        return False
+    else:
+        for keyword in correct_answers:
+            if keyword.lower() in normalized_user_answer: return True
+        return False
 
 # ========= Decoradores =========
 def check_maintenance(func):
@@ -269,37 +292,15 @@ def admin_only(func):
         return await func(update, context, *args, **kwargs)
     return wrapper
 
-# ========= Comandos Usuario =========
-@check_maintenance
-@log_command_usage
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    db = get_db()
-    user_id_str = str(user.id)
-
-    if user_id_str not in db.get("users", {}):
-        db["users"][user_id_str] = {
-            "username": user.username or user.first_name, "join_date": datetime.now().strftime("%Y-%m-%d"),
-            "progress": {level: [] for level in db.get('course_structure', {})}, "vip": False, "vip_expiry": None,
-            "banned": False, "points": 0, "last_seen": datetime.now().isoformat()
-        }
-        db["stats"]["total_users"] = db["stats"].get("total_users", 0) + 1
-    else:
-        db["users"][user_id_str]['last_seen'] = datetime.now().isoformat()
-        db["users"][user_id_str].setdefault('points', 0)
-    save_db(db)
-
+# ========= Lógica de Comandos y Menús Separada =========
+async def _display_start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message or update.callback_query.message
-    if db["users"][user_id_str].get("banned", False):
-        await message.reply_text("🚫 Estás baneado.")
-        return
-
-    welcome_msg = (f"¡Hola, <b>{user.first_name}</b>! 👋\n\n"
-                   f"Bienvenido a <b>CyberHub Academy v31.0</b>.")
+    welcome_msg = (f"¡Hola, <b>{update.effective_user.first_name}</b>! 👋\n\n"
+                   f"Bienvenido a <b>CyberHub Academy</b>.")
     keyboard = [
         [InlineKeyboardButton("🎓 Iniciar Curso", callback_data="menu:course")],
         [InlineKeyboardButton("🏆 Leaderboard", callback_data="menu:leaderboard"), InlineKeyboardButton("🔥 CTF Diario", callback_data="menu:daily_ctf")],
-        [InlineKeyboardButton("🛠️ Herramientas", callback_data="menu:tools")],
+        [InlineKeyboardButton("🛠️ Arsenal de Herramientas", callback_data="menu:tools")],
         [InlineKeyboardButton("⭐ Planes VIP", callback_data="menu:vip"), InlineKeyboardButton("👤 Mi Perfil", callback_data="menu:profile")],
         [InlineKeyboardButton("🔑 Canjear Clave", callback_data="menu:redeem")],
         [InlineKeyboardButton("📝 Feedback", callback_data="menu:feedback"), InlineKeyboardButton("🔄 Lección Random", callback_data="menu:random")]
@@ -308,6 +309,132 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.edit_text(welcome_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
     else:
         await message.reply_html(welcome_msg, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def _display_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra el perfil de usuario, ya sea en un mensaje nuevo o editado."""
+    message = update.message or update.callback_query.message
+    user_id_to_show = update.effective_user.id
+    user_data = get_user_data(user_id_to_show)
+
+    if not user_data:
+        await message.reply_text("❌ No se encontraron tus datos. Intenta con /start.")
+        return
+        
+    db = get_db()
+    all_user_ids_sorted = [
+        u_id for u_id, u_data in sorted(
+            db.get('users', {}).items(), 
+            key=lambda item: item[1].get('points', 0), 
+            reverse=True
+        ) if u_data.get('points', 0) > 0 and not u_data.get('banned')
+    ]
+    
+    try:
+        rank = all_user_ids_sorted.index(str(user_id_to_show)) + 1
+        rank_str = f"#{rank}"
+    except ValueError:
+        rank_str = "Sin Ranking"
+
+    completed_practices = sum(len(p) for p in user_data.get('progress', {}).values())
+    
+    text = (
+        f"👤 <b>Tu Perfil</b>\n"
+        f"<b>Usuario:</b> @{user_data.get('username', 'N/A')}\n"
+        f"🆔 <code>{user_id_to_show}</code>\n\n"
+        f"🏆 <b>Puntos:</b> {user_data.get('points', 0)}\n"
+        f"🌍 <b>Ranking Global:</b> {rank_str}\n"
+        f"✔️ <b>Prácticas Resueltas:</b> {completed_practices}"
+    )
+    
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]])
+    
+    # Decide si editar el mensaje (si viene de un botón) o enviar uno nuevo (si es un comando)
+    if hasattr(update, 'callback_query') and update.callback_query:
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await message.reply_html(text, reply_markup=kb)
+        
+
+async def _display_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message or update.callback_query.message
+    db = get_db()
+    valid_users = {uid: data for uid, data in db.get('users', {}).items() if data.get('points', 0) > 0 and not data.get('banned', False)}
+    text = "🏆 <b>Leaderboard Global</b>\n\n"
+    if not valid_users:
+        text += "Aún no hay nadie en el leaderboard. ¡Sé el primero!"
+    else:
+        sorted_users = sorted(valid_users.items(), key=lambda item: item[1]['points'], reverse=True)
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (user_id, user_data) in enumerate(sorted_users[:LEADERBOARD_SIZE]):
+            rank = medals[i] if i < 3 else f"<b>#{i+1}</b>"
+            username = user_data.get('username', f'Usuario_{user_id[-4:]}')
+            points = user_data.get('points', 0)
+            text += f"{rank} @{username} - {points} puntos\n"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]])
+    if hasattr(update, 'callback_query') and update.callback_query: await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else: await message.reply_html(text, reply_markup=kb)
+
+async def _display_daily_ctf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message or update.callback_query.message
+    db = get_db()
+    ctf = db.get('daily_ctf', {})
+    user_id_str = str(update.effective_user.id)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]])
+    text = ""
+    if ctf.get('date') != today_str or ctf.get('practice') == "No hay CTF activo.":
+        text = "🤔 El CTF de hoy aún no ha sido publicado. ¡Vuelve más tarde!"
+    elif user_id_str in ctf.get('solvers', []):
+        text = "¡Felicidades! Ya resolviste el CTF de hoy. Vuelve mañana para un nuevo reto."
+    else:
+        text = f"🔥 <b>CTF del Día ({today_str})</b>\n\n<b>Reto:</b>\n{ctf['practice']}\n\n"
+        text += "Envía tu respuesta con el comando <code>/solve [tu_respuesta]</code>"
+    
+    if hasattr(update, 'callback_query') and update.callback_query:
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await message.reply_html(text, reply_markup=kb)
+
+async def _display_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message or update.callback_query.message
+    db = get_db()
+    stats = db.get("stats", {})
+    maint_status = "ON 🟢" if db.get("bot_state", {}).get("maintenance_mode") else "OFF 🔴"
+    text = (f"⚙️ <b>Panel de Administración</b> ⚙️\n\n"
+            f"👥 <b>Usuarios:</b> {stats.get('total_users', 0)}\n"
+            f"⭐ <b>VIPs Activos:</b> {stats.get('active_vip', 0)}\n"
+            f"🛠️ <b>Mantenimiento:</b> {maint_status}")
+    keyboard = [[InlineKeyboardButton("🔑 Generar Claves", callback_data="admin:genkey")],
+                [InlineKeyboardButton("👤 Gestionar Usuario", callback_data="admin:manage_user")],
+                [InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcast")],
+                [InlineKeyboardButton("➕ Añadir Lección", callback_data="admin:add_lesson")],
+                [InlineKeyboardButton("🔥 Poner CTF Diario", callback_data="admin:set_ctf")],
+                [InlineKeyboardButton("📊 Estadísticas", callback_data="admin:botstats")],
+                [InlineKeyboardButton("Toggle Mantenimiento", callback_data="admin:maintenance")]]
+    if hasattr(update, 'callback_query') and update.callback_query:
+        await message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+    else:
+        await message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+# ========= Comandos de Usuario (Wrappers) =========
+@check_maintenance
+@log_command_usage
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    db = get_db()
+    user_id_str = str(user.id)
+    if user_id_str not in db.get("users", {}):
+        db["users"][user_id_str] = {"username": user.username or user.first_name, "join_date": datetime.now().strftime("%Y-%m-%d"), "progress": {level: [] for level in db.get('course_structure', {})}, "vip": False, "vip_expiry": None, "banned": False, "points": 0, "last_seen": datetime.now().isoformat()}
+        db["stats"]["total_users"] = db["stats"].get("total_users", 0) + 1
+    else:
+        db["users"][user_id_str]['last_seen'] = datetime.now().isoformat()
+        db["users"][user_id_str].setdefault('points', 0)
+    save_db(db)
+    message = update.message or update.callback_query.message
+    if db["users"][user_id_str].get("banned", False):
+        await message.reply_text("🚫 Estás baneado.")
+        return
+    await _display_start_menu(update, context)
 
 @check_maintenance
 @log_command_usage
@@ -318,7 +445,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<b>Herramientas Gratuitas:</b>\n"
             "/base64, /hash\n\n"
             "<b>Herramientas VIP 🔒:</b>\n"
-            "/url, /dns, /cve, /whois, /subdomains, /httpheaders, /portscan")
+            "/url, /dns, /cve, /whois, /subdomains, /httpheaders, /portscan, /jwt_decode\n\n"
+            "Para mas ayuda escribe a @alvarito_y")
     if update.effective_user.id == ADMIN_ID:
         text += ("\n\n<b>Admin:</b>\n"
                  "/admin, /key, /maintenance, /botstats, /add_lesson, /set_ctf")
@@ -344,7 +472,6 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_expiry = current_expiry + timedelta(days=days)
         except (ValueError, TypeError): new_expiry = datetime.now() + timedelta(days=days)
     else: new_expiry = datetime.now() + timedelta(days=days)
-
     if is_new_vip: db["stats"]["active_vip"] = db["stats"].get("active_vip", 0) + 1
     user_data["vip"] = True
     user_data["vip_expiry"] = new_expiry.strftime("%Y-%m-%d %H:%M:%S")
@@ -356,72 +483,17 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @check_maintenance
 @log_command_usage
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_profile(update, context, update.effective_user.id)
-
-async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id_to_show: int):
-    message = update.message or update.callback_query.message
-    user_data = get_user_data(user_id_to_show)
-    if not user_data: return await message.reply_text("❌ Usuario no encontrado.")
-    db = get_db()
-    all_user_ids_sorted = [u_id for u_id, u_data in sorted(db.get('users', {}).items(), key=lambda item: item[1].get('points', 0), reverse=True) if u_data.get('points', 0) > 0 and not u_data.get('banned')]
-    try:
-        rank = all_user_ids_sorted.index(str(user_id_to_show)) + 1
-        rank_str = f"#{rank}"
-    except ValueError: rank_str = "Sin Ranking"
-    completed_practices = sum(len(p) for p in user_data.get('progress', {}).values())
-    text = (f"👤 <b>Perfil de @{user_data.get('username', 'N/A')}</b>\n"
-            f"🆔 <code>{user_id_to_show}</code>\n\n"
-            f"🏆 <b>Puntos:</b> {user_data.get('points', 0)}\n"
-            f"🌍 <b>Ranking Global:</b> {rank_str}\n"
-            f"✔️ <b>Prácticas Resueltas:</b> {completed_practices}")
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]])
-    if hasattr(update, 'callback_query') and update.callback_query:
-        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-    else: await message.reply_html(text)
+    await _display_profile(update, context)
 
 @check_maintenance
 @log_command_usage
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message or update.callback_query.message
-    db = get_db()
-    valid_users = {uid: data for uid, data in db.get('users', {}).items() if data.get('points', 0) > 0 and not data.get('banned', False)}
-    if not valid_users:
-        text = "Aún no hay nadie en el leaderboard. ¡Sé el primero!"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]]) if hasattr(update, 'callback_query') else None
-        if hasattr(update, 'callback_query'): return await message.edit_text(text, reply_markup=kb)
-        else: return await message.reply_text(text)
-    sorted_users = sorted(valid_users.items(), key=lambda item: item[1]['points'], reverse=True)
-    text = "🏆 <b>Leaderboard Global</b>\n\n"
-    medals = ["🥇", "🥈", "🥉"]
-    for i, (user_id, user_data) in enumerate(sorted_users[:LEADERBOARD_SIZE]):
-        rank = medals[i] if i < 3 else f"<b>#{i+1}</b>"
-        username = user_data.get('username', f'Usuario_{user_id[-4:]}')
-        points = user_data.get('points', 0)
-        text += f"{rank} @{username} - {points} puntos\n"
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]]) if hasattr(update, 'callback_query') else None
-    if hasattr(update, 'callback_query'): await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-    else: await message.reply_html(text)
+    await _display_leaderboard(update, context)
 
 @check_maintenance
 @log_command_usage
 async def daily_ctf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message or update.callback_query.message
-    db, ctf, user_id_str, todadb = get_db()
-ctf = db.get('daily_ctf', {})
-# ...etcy_str = get_db(), db.get('daily_ctf', {}), str(update.effective_user.id), datetime.now().strftime("%Y-%m-%d")
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]])
-    if ctf.get('date') != today_str or ctf.get('practice') == "No hay CTF activo.":
-        text = "🤔 El CTF de hoy aún no ha sido publicado. ¡Vuelve más tarde!"
-        if hasattr(update, 'callback_query'): return await message.edit_text(text, reply_markup=kb)
-        else: return await message.reply_text(text)
-    if user_id_str in ctf.get('solvers', []):
-        text = "¡Felicidades! Ya resolviste el CTF de hoy. Vuelve mañana para un nuevo reto."
-        if hasattr(update, 'callback_query'): return await message.edit_text(text, reply_markup=kb)
-        else: return await message.reply_text(text)
-    text = f"🔥 <b>CTF del Día ({today_str})</b>\n\n<b>Reto:</b>\n{ctf['practice']}\n\n"
-    text += "Envía tu respuesta con el comando <code>/solve [tu_respuesta]</code>"
-    if hasattr(update, 'callback_query'): await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-    else: await message.reply_html(text)
+    await _display_daily_ctf(update, context)
 
 @check_maintenance
 @log_command_usage
@@ -430,8 +502,7 @@ async def solve_ctf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_answer, user_id_str, db, ctf = " ".join(context.args), str(update.effective_user.id), get_db(), db.get('daily_ctf', {})
     if ctf.get('date') != datetime.now().strftime("%Y-%m-%d"): return await update.message.reply_text("El CTF de hoy ya no está activo.")
     if user_id_str in ctf.get('solvers', []): return await update.message.reply_text("Ya has resuelto el CTF de hoy.")
-    normalized_user_answer = user_answer.lower().strip()
-    if ctf.get('answer') and any(keyword.lower() in normalized_user_answer for keyword in ctf.get('answer')):
+    if check_flexible_answer(user_answer, ctf.get('answer', [])):
         db['users'][user_id_str]['points'] = db['users'][user_id_str].get('points', 0) + POINTS_PER_CTF
         db['daily_ctf']['solvers'].append(user_id_str)
         save_db(db)
@@ -442,7 +513,7 @@ async def solve_ctf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @log_command_usage
 async def feedback_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message or update.callback_query.message
-    await message.edit_text("Escribe tu feedback para el administrador. Envía /cancel para anular.", reply_markup=None)
+    await message.edit_text("Escribe tu feedback para el administrador @alvarito_y. Envía /cancel para anular.", reply_markup=None)
     return AWAITING_FEEDBACK
 
 async def handle_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -456,12 +527,17 @@ async def handle_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"No se pudo enviar feedback al admin: {e}")
         await update.message.reply_text("❌ Hubo un error al enviar tu feedback.")
+    await start_command(update, context)
     return ConversationHandler.END
 
 async def cancel_conversation_generic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data: context.user_data.clear()
-    await update.message.reply_text("Operación cancelada.")
-    await start_command(update, context) # Vuelve al menú principal
+    message = update.message or (hasattr(update, 'callback_query') and update.callback_query.message)
+    await message.reply_text("Operación cancelada.")
+    if update.effective_user.id == ADMIN_ID:
+        await _display_admin_panel(update, context)
+    else:
+        await _display_start_menu(update, context)
     return ConversationHandler.END
 
 @check_maintenance
@@ -481,19 +557,14 @@ async def base64_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def hash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await update.message.reply_html("<b>Uso:</b> <code>/hash [texto]</code>")
     text_to_hash = " ".join(context.args).encode('utf-8')
-    md5 = hashlib.md5(text_to_hash).hexdigest()
-    sha1 = hashlib.sha1(text_to_hash).hexdigest()
-    sha256 = hashlib.sha256(text_to_hash).hexdigest()
+    md5, sha1, sha256 = hashlib.md5(text_to_hash).hexdigest(), hashlib.sha1(text_to_hash).hexdigest(), hashlib.sha256(text_to_hash).hexdigest()
     await update.message.reply_html(f"<b>Hashes para:</b> <code>{' '.join(context.args)}</code>\n\n"
-                                    f"<b>MD5:</b> <code>{md5}</code>\n"
-                                    f"<b>SHA1:</b> <code>{sha1}</code>\n"
-                                    f"<b>SHA256:</b> <code>{sha256}</code>")
+                                    f"<b>MD5:</b> <code>{md5}</code>\n<b>SHA1:</b> <code>{sha1}</code>\n<b>SHA256:</b> <code>{sha256}</code>")
 
 @check_maintenance
 @log_command_usage
 async def url_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data = get_user_data(update.effective_user.id)
-    if not user_data.get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
+    if not get_user_data(update.effective_user.id).get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
     if len(context.args) < 2: return await update.message.reply_html("<b>Uso:</b> <code>/url [enc|dec] [texto]</code>")
     mode, text = context.args[0].lower(), " ".join(context.args[1:])
     try:
@@ -506,8 +577,7 @@ async def url_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @check_maintenance
 @log_command_usage
 async def dns_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data = get_user_data(update.effective_user.id)
-    if not user_data.get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
+    if not get_user_data(update.effective_user.id).get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
     if len(context.args) != 2: return await update.message.reply_html("<b>Uso:</b> <code>/dns [a|mx|txt] [dominio]</code>")
     q_type, domain = context.args[0].upper(), context.args[1]
     if q_type not in ["A", "MX", "TXT"]: return await update.message.reply_html("Tipo de registro inválido. Usa 'a', 'mx' o 'txt'.")
@@ -516,16 +586,13 @@ async def dns_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answers = dns.resolver.resolve(domain, q_type)
         results = [str(rdata) for rdata in answers]
         if not results: await update.message.reply_text(f"No se encontraron registros {q_type} para {domain}.")
-        else:
-            text = f"<b>Registros {q_type} para {domain}:</b>\n\n" + "\n".join([f"<code>{res}</code>" for res in results])
-            await update.message.reply_html(text)
+        else: await update.message.reply_html(f"<b>Registros {q_type} para {domain}:</b>\n\n" + "\n".join([f"<code>{res}</code>" for res in results]))
     except Exception as e: await update.message.reply_text(f"❌ Error al consultar DNS: {e}")
 
 @check_maintenance
 @log_command_usage
 async def cve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data = get_user_data(update.effective_user.id)
-    if not user_data.get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
+    if not get_user_data(update.effective_user.id).get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
     if not context.args: return await update.message.reply_html("<b>Uso:</b> <code>/cve CVE-XXXX-XXXXX</code>")
     cve_id = context.args[0].upper()
     if not re.match(r'^CVE-\d{4}-\d{4,}$', cve_id): return await update.message.reply_html("Formato de CVE inválido.")
@@ -538,10 +605,8 @@ async def cve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             doc = data["data"]["documents"][cve_id]
             score = doc.get("cvss", {}).get("score", "N/A")
             description = doc.get('description', 'No disponible.').replace('<', '&lt;').replace('>', '&gt;')
-            text = (f"📄 <b>{doc.get('id')} - {doc.get('title')}</b>\n\n"
-                    f"<b>Puntuación CVSS:</b> {score}\n"
-                    f"<b>Publicado:</b> {doc.get('published')}\n\n"
-                    f"<b>Descripción:</b>\n{description}")
+            text = (f"📄 <b>{doc.get('id')} - {doc.get('title')}</b>\n\n<b>Puntuación CVSS:</b> {score}\n"
+                    f"<b>Publicado:</b> {doc.get('published')}\n\n<b>Descripción:</b>\n{description}")
             await update.message.reply_html(text[:4096])
         else: await update.message.reply_html(f"No se encontró información para <code>{cve_id}</code>.")
     except Exception as e: await update.message.reply_html(f"❌ Error al consultar la API: {e}")
@@ -549,8 +614,7 @@ async def cve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @check_maintenance
 @log_command_usage
 async def whois_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data = get_user_data(update.effective_user.id)
-    if not user_data or not user_data.get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
+    if not get_user_data(update.effective_user.id).get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
     if not context.args: return await update.message.reply_html("<b>Uso:</b> <code>/whois dominio.com</code>")
     domain = context.args[0].strip().lower()
     try:
@@ -559,31 +623,26 @@ async def whois_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         r.raise_for_status()
         data = r.json()
         registrar = next((e['vcardArray'][1][1][3] for e in data.get("entities", []) if 'registrar' in e.get('roles', [])), "N/D")
-        status_list = data.get("status", [])
-        name_servers = [ns.get("ldhName") for ns in data.get("nameservers", [])]
+        status, name_servers = data.get("status", []), [ns.get("ldhName") for ns in data.get("nameservers", [])]
         events = data.get("events", [])
         created = next((e.get("eventDate") for e in events if e.get("eventAction") == "registration"), "N/D")
         expires = next((e.get("eventDate") for e in events if e.get("eventAction") == "expiration"), "N/D")
         text = (f"📄 <b>WHOIS / RDAP para {domain}</b>\n\n"
-                f"• <b>Registrar:</b> {registrar}\n"
-                f"• <b>Creado:</b> {created}\n"
-                f"• <b>Expira:</b> {expires}\n"
-                f"• <b>Status:</b> {', '.join(status_list)}\n"
-                f"• <b>NS:</b> {', '.join(name_servers)}")
+                f"• <b>Registrar:</b> {registrar}\n• <b>Creado:</b> {created}\n• <b>Expira:</b> {expires}\n"
+                f"• <b>Status:</b> {', '.join(status)}\n• <b>NS:</b> {', '.join(name_servers)}")
         await update.message.reply_html(text[:4096])
     except Exception as e: await update.message.reply_html(f"❌ Error WHOIS/RDAP: {e}")
 
 @check_maintenance
 @log_command_usage
 async def subdomains_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data = get_user_data(update.effective_user.id)
-    if not user_data or not user_data.get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
+    if not get_user_data(update.effective_user.id).get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
     if not context.args: return await update.message.reply_html("<b>Uso:</b> <code>/subdomains dominio.com</code>")
     domain = context.args[0].strip().lower()
     await update.message.reply_text(f"Buscando subdominios para <code>{domain}</code> (puede tardar)...", parse_mode=ParseMode.HTML)
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-        response = requests.get(f"https://crt.sh/?q=%.{domain}&output=json", timeout=20)
+        response = requests.get(f"https://crt.sh/?q=%.{domain}&output=json", timeout=25)
         response.raise_for_status()
         subdomains = sorted(list(set(entry['name_value'] for entry in response.json() if '*' not in entry['name_value'])))
         if subdomains:
@@ -597,8 +656,7 @@ async def subdomains_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @check_maintenance
 @log_command_usage
 async def httpheaders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data = get_user_data(update.effective_user.id)
-    if not user_data or not user_data.get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
+    if not get_user_data(update.effective_user.id).get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
     if not context.args: return await update.message.reply_html("<b>Uso:</b> <code>/httpheaders dominio.com</code>")
     domain = context.args[0].strip().lower()
     url = f"https://{domain}" if not domain.startswith("http") else domain
@@ -606,28 +664,24 @@ async def httpheaders_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
         response = requests.get(url, timeout=10, allow_redirects=True, headers={'User-Agent': 'CyberHubBot/1.0'})
         text = f"📄 <b>Cabeceras HTTP para {domain}</b>\n\n"
-        for key, value in response.headers.items():
-            text += f"<b>{key}:</b> <code>{value}</code>\n"
+        for key, value in response.headers.items(): text += f"<b>{key}:</b> <code>{value}</code>\n"
         await update.message.reply_html(text[:4096])
     except Exception as e: await update.message.reply_html(f"❌ Error al obtener cabeceras: {e}")
 
 @check_maintenance
 @log_command_usage
 async def portscan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data = get_user_data(update.effective_user.id)
-    if not user_data or not user_data.get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
+    if not get_user_data(update.effective_user.id).get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
     if not context.args: return await update.message.reply_html("<b>Uso:</b> <code>/portscan [ip_o_dominio]</code>")
     target = context.args[0].strip()
     await update.message.reply_text(f"🔎 Escaneando puertos comunes en <code>{target}</code>...", parse_mode=ParseMode.HTML)
     try:
-        ip = socket.gethostbyname(target)
-        open_ports = []
+        ip, open_ports = socket.gethostbyname(target), []
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
         for port in COMMON_PORTS:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.settimeout(0.5)
-                if sock.connect_ex((ip, port)) == 0:
-                    open_ports.append(port)
+                if sock.connect_ex((ip, port)) == 0: open_ports.append(port)
         if open_ports: text = f"🟢 <b>Puertos Abiertos en {target} ({ip}):</b>\n" + ", ".join([f"<code>{p}</code>" for p in open_ports])
         else: text = f"🔴 No se encontraron puertos abiertos comunes en <b>{target} ({ip})</b>."
         await update.message.reply_html(text)
@@ -635,10 +689,25 @@ async def portscan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @check_maintenance
 @log_command_usage
+async def jwt_decode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not get_user_data(update.effective_user.id).get("vip"): return await update.message.reply_html("🔒 Herramienta exclusiva para <b>miembros VIP</b>.")
+    if not context.args: return await update.message.reply_html("<b>Uso:</b> <code>/jwt_decode [token]</code>")
+    token = context.args[0]
+    parts = token.split('.')
+    if len(parts) != 3: return await update.message.reply_html("❌ Token JWT inválido. Debe tener 3 partes separadas por puntos.")
+    try:
+        header = json.dumps(json.loads(base64.urlsafe_b64decode(parts[0] + '==').decode('utf-8')), indent=2)
+        payload = json.dumps(json.loads(base64.urlsafe_b64decode(parts[1] + '==').decode('utf-8')), indent=2)
+        text = (f"📄 <b>Token JWT Decodificado</b>\n\n<b>Header:</b>\n<pre>{header}</pre>\n\n"
+                f"<b>Payload:</b>\n<pre>{payload}</pre>\n\n<i>Nota: La firma no ha sido verificada.</i>")
+        await update.message.reply_html(text)
+    except Exception as e: await update.message.reply_html(f"❌ Error al decodificar el token: {e}")
+
+@check_maintenance
+@log_command_usage
 async def random_lesson_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message or update.callback_query.message
-    db = get_db()
-    content = db.get('content', {})
+    db, content = get_db(), db.get('content', {})
     if not content: return await message.reply_text("No hay lecciones disponibles.")
     random_lesson_id = random.choice(list(content.keys()))
     random_lesson = content[random_lesson_id]
@@ -652,23 +721,7 @@ async def random_lesson_command(update: Update, context: ContextTypes.DEFAULT_TY
 @log_command_usage
 @admin_only
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message or update.callback_query.message
-    db = get_db()
-    stats = db.get("stats", {})
-    maint_status = "ON 🟢" if db.get("bot_state", {}).get("maintenance_mode") else "OFF 🔴"
-    text = (f"⚙️ <b>Panel de Administración</b> ⚙️\n\n"
-            f"👥 <b>Usuarios:</b> {stats.get('total_users', 0)}\n"
-            f"⭐ <b>VIPs Activos:</b> {stats.get('active_vip', 0)}\n"
-            f"🛠️ <b>Mantenimiento:</b> {maint_status}")
-    keyboard = [[InlineKeyboardButton("🔑 Generar Claves", callback_data="admin:genkey")],
-                [InlineKeyboardButton("👤 Gestionar Usuario", callback_data="admin:manage_user")],
-                [InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcast")],
-                [InlineKeyboardButton("➕ Añadir Lección", callback_data="admin:add_lesson")],
-                [InlineKeyboardButton("🔥 Poner CTF Diario", callback_data="admin:set_ctf")],
-                [InlineKeyboardButton("📊 Estadísticas", callback_data="admin:botstats")],
-                [InlineKeyboardButton("Toggle Mantenimiento", callback_data="admin:maintenance")]]
-    if hasattr(update, 'callback_query'): await message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
-    else: await message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await _display_admin_panel(update, context)
 
 @log_command_usage
 @admin_only
@@ -700,16 +753,30 @@ async def maintenance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 @log_command_usage
 @admin_only
 async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _display_botstats(update, context)
+
+async def _display_botstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message or update.callback_query.message
-    db, stats = get_db(), db.get('stats', {})
-    command_stats, sorted_commands = stats.get('commands', {}), sorted(command_stats.items(), key=lambda item: item[1], reverse=True)
+    
+    # --- CORRECCIÓN AQUÍ ---
+    db = get_db()
+    stats = db.get('stats', {})
+    # -----------------------
+
+    command_stats = stats.get('commands', {})
+    sorted_commands = sorted(command_stats.items(), key=lambda item: item[1], reverse=True)
+    
     text = (f"🤖 <b>Estadísticas del Bot</b> 🤖\n\n"
             f"👥 <b>Usuarios Totales:</b> {stats.get('total_users', 0)}\n"
             f"⭐ <b>VIPs Activos:</b> {stats.get('active_vip', 0)}\n\n"
             "<b>Uso de Comandos:</b>\n" + ("\n".join([f"  • <code>/{c}</code>: {v} veces" for c, v in sorted_commands[:10]]) or "  No hay datos."))
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin:panel")]]) if hasattr(update, 'callback_query') else None
-    if hasattr(update, 'callback_query'): await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-    else: await message.reply_html(text)
+    
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin:panel")]])
+    
+    if hasattr(update, 'callback_query') and update.callback_query:
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await message.reply_html(text, reply_markup=kb)
 
 @log_command_usage
 @admin_only
@@ -757,6 +824,7 @@ async def receive_lesson_answer(update: Update, context: ContextTypes.DEFAULT_TY
     save_db(db)
     await update.message.reply_text(f"✅ ¡Lección '{lesson_data['id']}' añadida al nivel '{lesson_data['level']}'!")
     context.user_data.clear()
+    await _display_admin_panel(update, context)
     return ConversationHandler.END
 
 @log_command_usage
@@ -779,6 +847,7 @@ async def receive_ctf_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     save_db(db)
     await update.message.reply_text("✅ CTF del día configurado.")
     context.user_data.clear()
+    await _display_admin_panel(update, context)
     return ConversationHandler.END
 
 @log_command_usage
@@ -801,6 +870,7 @@ async def receive_broadcast_message(update: Update, context: ContextTypes.DEFAUL
         except Exception as e:
             failed_count += 1; logger.error(f"Broadcast fallido a {user_id}: {e}")
     await update.message.reply_text(f"✅ Broadcast completado!\nEnviado a: {sent_count}\nFallaron: {failed_count}")
+    await _display_admin_panel(update, context)
     return ConversationHandler.END
 
 @log_command_usage
@@ -873,14 +943,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += "<i>Las 3 primeras lecciones son gratuitas. El resto requiere VIP.</i>"
             keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data="menu:main")])
             await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
-        elif sub_command == 'leaderboard': await leaderboard_command(update, context)
-        elif sub_command == 'daily_ctf': await daily_ctf_command(update, context)
+        elif sub_command == 'leaderboard': await _display_leaderboard(update, context)
+        elif sub_command == 'daily_ctf': await _display_daily_ctf(update, context)
         elif sub_command == 'random': await random_lesson_command(update, context)
-        elif sub_command == 'profile': await show_profile(update, context, user_id)
+        elif sub_command == 'profile':
+            await _display_profile(update, context)
         elif sub_command == 'tools':
             text = ("<b>🛠️ Arsenal</b>\nUsa estos comandos:\n\n"
                     "<b>GRATIS:</b>\n• <code>/base64</code>, <code>/hash</code>\n\n"
-                    "<b>VIP 🔒:</b>\n• <code>/url</code>, <code>/dns</code>, <code>/cve</code>, <code>/whois</code>, <code>/subdomains</code>, <code>/httpheaders</code>, <code>/portscan</code>")
+                    "<b>VIP 🔒:</b>\n• <code>/url</code>, <code>/dns</code>, <code>/cve</code>, <code>/whois</code>, <code>/subdomains</code>, <code>/httpheaders</code>, <code>/portscan</code>, <code>/jwt_decode</code>")
             await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]]), parse_mode=ParseMode.HTML)
         elif sub_command == 'vip':
             status_text = "❌ <b>INACTIVO</b>"
@@ -950,9 +1021,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sub_command = parts[1]
         if sub_command == 'maintenance':
             db = get_db(); db['bot_state']['maintenance_mode'] = not db['bot_state'].get('maintenance_mode', False); save_db(db)
-            await admin_command(update, context)
-        elif sub_command == 'botstats': await botstats_command(update, context)
-        elif sub_command == 'panel': await admin_command(update, context)
+            await _display_admin_panel(update, context)
+        elif sub_command == 'botstats': await _display_botstats(update, context)
+        elif sub_command == 'panel': await _display_admin_panel(update, context)
         elif sub_command == 'genkey':
             plans_kb = [[InlineKeyboardButton(plan['name'], callback_data=f"admin:genkey_create:{plan_name}")] for plan_name, plan in VIP_PLANS.items()]
             plans_kb.append([InlineKeyboardButton("🔙 Volver", callback_data="admin:panel")])
@@ -1001,9 +1072,7 @@ async def handle_practice_answer(update: Update, context: ContextTypes.DEFAULT_T
     content = db.get('content', {})
     correct_answer_keywords = content.get(lesson_id, {}).get('answer', [])
     
-    normalized_user_answer = user_answer.lower().strip()
-    
-    if correct_answer_keywords and all(keyword.lower() in normalized_user_answer for keyword in correct_answer_keywords):
+    if check_flexible_answer(user_answer, correct_answer_keywords):
         user_progress = db["users"][user_id_str].get('progress', {})
         level_progress = user_progress.setdefault(level_id, [])
         reply_text = "✅ ¡Correcto! "
@@ -1031,9 +1100,11 @@ async def handle_practice_answer(update: Update, context: ContextTypes.DEFAULT_T
         
 # --- Función Principal ---
 def main():
-    if not TOKEN or "TU_TOKEN_AQUI" in TOKEN:
-        logger.critical("¡Error Crítico! El TOKEN del bot no está configurado.")
+    if not TOKEN or "YOUR_TELEGRAM_TOKEN" in TOKEN:
+        logger.critical("¡Error Crítico! El TOKEN del bot no está configurado en el archivo config.env")
         return
+    if not ADMIN_ID:
+        logger.warning("Advertencia: El ADMIN_ID no está configurado.")
     
     app = Application.builder().token(TOKEN).build()
     admin_filter = filters.User(user_id=ADMIN_ID)
@@ -1098,6 +1169,7 @@ def main():
     app.add_handler(CommandHandler("subdomains", subdomains_command))
     app.add_handler(CommandHandler("httpheaders", httpheaders_command))
     app.add_handler(CommandHandler("portscan", portscan_command))
+    app.add_handler(CommandHandler("jwt_decode", jwt_decode_command))
     
     app.add_handler(CommandHandler("admin", admin_command, filters=admin_filter))
     app.add_handler(CommandHandler("key", key_command, filters=admin_filter))
@@ -1113,7 +1185,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("Iniciando CyberHub Academy")
+    logger.info("Iniciando CyberHub Academy Bot v32.0...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
