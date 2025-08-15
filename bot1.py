@@ -209,8 +209,6 @@ BASE_CONTENT_HUB = create_full_content_hub()
 # ========= Base de Datos =========
 def get_db():
     if not os.path.exists(DB_FILE):
-        if not BASE_CONTENT_HUB:
-             raise ValueError("El contenido base de las lecciones (BASE_CONTENT_HUB) está vacío. El bot no puede iniciar.")
         return {
             "users": {}, "keys": {}, "content": BASE_CONTENT_HUB, "course_structure": BASE_COURSE_STRUCTURE,
             "stats": {"total_users": 0, "active_vip": 0, "commands": {}},
@@ -296,9 +294,9 @@ def admin_only(func):
 async def _display_start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message or update.callback_query.message
     welcome_msg = (f"¡Hola, <b>{update.effective_user.first_name}</b>! 👋\n\n"
-                   f"Bienvenido a <b>CyberHub Academy</b>.")
+                   f"Bienvenido a <b>CyberHub Academy v53.0</b>.")
     keyboard = [
-        [InlineKeyboardButton("🎓 Iniciar Curso", callback_data="menu:course")],
+        [InlineKeyboardButton("🎓 Iniciar Formación", callback_data="menu:course")],
         [InlineKeyboardButton("🏆 Leaderboard", callback_data="menu:leaderboard"), InlineKeyboardButton("🔥 CTF Diario", callback_data="menu:daily_ctf")],
         [InlineKeyboardButton("🛠️ Arsenal de Herramientas", callback_data="menu:tools")],
         [InlineKeyboardButton("⭐ Planes VIP", callback_data="menu:vip"), InlineKeyboardButton("👤 Mi Perfil", callback_data="menu:profile")],
@@ -310,50 +308,26 @@ async def _display_start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await message.reply_html(welcome_msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def _display_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra el perfil de usuario, ya sea en un mensaje nuevo o editado."""
+async def _display_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id_to_show: int):
     message = update.message or update.callback_query.message
-    user_id_to_show = update.effective_user.id
     user_data = get_user_data(user_id_to_show)
-
-    if not user_data:
-        await message.reply_text("❌ No se encontraron tus datos. Intenta con /start.")
-        return
-        
+    if not user_data: return await message.reply_text("❌ Usuario no encontrado.")
     db = get_db()
-    all_user_ids_sorted = [
-        u_id for u_id, u_data in sorted(
-            db.get('users', {}).items(), 
-            key=lambda item: item[1].get('points', 0), 
-            reverse=True
-        ) if u_data.get('points', 0) > 0 and not u_data.get('banned')
-    ]
-    
+    all_user_ids_sorted = [u_id for u_id, u_data in sorted(db.get('users', {}).items(), key=lambda item: item[1].get('points', 0), reverse=True) if u_data.get('points', 0) > 0 and not u_data.get('banned')]
     try:
         rank = all_user_ids_sorted.index(str(user_id_to_show)) + 1
         rank_str = f"#{rank}"
-    except ValueError:
-        rank_str = "Sin Ranking"
-
+    except ValueError: rank_str = "Sin Ranking"
     completed_practices = sum(len(p) for p in user_data.get('progress', {}).values())
-    
-    text = (
-        f"👤 <b>Tu Perfil</b>\n"
-        f"<b>Usuario:</b> @{user_data.get('username', 'N/A')}\n"
-        f"🆔 <code>{user_id_to_show}</code>\n\n"
-        f"🏆 <b>Puntos:</b> {user_data.get('points', 0)}\n"
-        f"🌍 <b>Ranking Global:</b> {rank_str}\n"
-        f"✔️ <b>Prácticas Resueltas:</b> {completed_practices}"
-    )
-    
+    text = (f"👤 <b>Perfil de @{user_data.get('username', 'N/A')}</b>\n"
+            f"🆔 <code>{user_id_to_show}</code>\n\n"
+            f"🏆 <b>Puntos:</b> {user_data.get('points', 0)}\n"
+            f"🌍 <b>Ranking Global:</b> {rank_str}\n"
+            f"✔️ <b>Prácticas Resueltas:</b> {completed_practices}")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]])
-    
-    # Decide si editar el mensaje (si viene de un botón) o enviar uno nuevo (si es un comando)
     if hasattr(update, 'callback_query') and update.callback_query:
         await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-    else:
-        await message.reply_html(text, reply_markup=kb)
-        
+    else: await message.reply_html(text)
 
 async def _display_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message or update.callback_query.message
@@ -483,7 +457,7 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @check_maintenance
 @log_command_usage
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _display_profile(update, context)
+    await _display_profile(update, context, update.effective_user.id)
 
 @check_maintenance
 @log_command_usage
@@ -757,26 +731,15 @@ async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _display_botstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message or update.callback_query.message
-    
-    # --- CORRECCIÓN AQUÍ ---
-    db = get_db()
-    stats = db.get('stats', {})
-    # -----------------------
-
-    command_stats = stats.get('commands', {})
-    sorted_commands = sorted(command_stats.items(), key=lambda item: item[1], reverse=True)
-    
+    db, stats = get_db(), db.get('stats', {})
+    command_stats, sorted_commands = stats.get('commands', {}), sorted(command_stats.items(), key=lambda item: item[1], reverse=True)
     text = (f"🤖 <b>Estadísticas del Bot</b> 🤖\n\n"
             f"👥 <b>Usuarios Totales:</b> {stats.get('total_users', 0)}\n"
             f"⭐ <b>VIPs Activos:</b> {stats.get('active_vip', 0)}\n\n"
             "<b>Uso de Comandos:</b>\n" + ("\n".join([f"  • <code>/{c}</code>: {v} veces" for c, v in sorted_commands[:10]]) or "  No hay datos."))
-    
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin:panel")]])
-    
-    if hasattr(update, 'callback_query') and update.callback_query:
-        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-    else:
-        await message.reply_html(text, reply_markup=kb)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin:panel")]]) if hasattr(update, 'callback_query') else None
+    if hasattr(update, 'callback_query'): await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else: await message.reply_html(text)
 
 @log_command_usage
 @admin_only
@@ -946,8 +909,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif sub_command == 'leaderboard': await _display_leaderboard(update, context)
         elif sub_command == 'daily_ctf': await _display_daily_ctf(update, context)
         elif sub_command == 'random': await random_lesson_command(update, context)
-        elif sub_command == 'profile':
-            await _display_profile(update, context)
+        elif sub_command == 'profile': await _display_profile(update, context, user_id)
         elif sub_command == 'tools':
             text = ("<b>🛠️ Arsenal</b>\nUsa estos comandos:\n\n"
                     "<b>GRATIS:</b>\n• <code>/base64</code>, <code>/hash</code>\n\n"
@@ -1100,8 +1062,8 @@ async def handle_practice_answer(update: Update, context: ContextTypes.DEFAULT_T
         
 # --- Función Principal ---
 def main():
-    if not TOKEN or "YOUR_TELEGRAM_TOKEN" in TOKEN:
-        logger.critical("¡Error Crítico! El TOKEN del bot no está configurado en el archivo config.env")
+    if not TOKEN:
+        logger.critical("¡Error Crítico! El TOKEN del bot no está configurado en el archivo configs.env")
         return
     if not ADMIN_ID:
         logger.warning("Advertencia: El ADMIN_ID no está configurado.")
@@ -1185,7 +1147,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("Iniciando CyberHub Academy Bot v32.0...")
+    logger.info("Iniciando CyberHub Academy Bot v35.0 - Edición Monolítica...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
