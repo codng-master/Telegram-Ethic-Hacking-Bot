@@ -592,10 +592,6 @@ async def cancel_conversation_generic(update: Update, context: ContextTypes.DEFA
         await _display_start_menu(update, context)
     return ConversationHandler.END
 
-# ... (El código completo continúa en la siguiente celda)
-Python
-
-# (Continuación del código v44.0)
 
 # --- Herramientas ---
 @check_maintenance
