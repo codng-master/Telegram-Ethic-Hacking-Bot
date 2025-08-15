@@ -243,6 +243,8 @@ def get_user_data(user_id):
     user.setdefault('progress', {level: [] for level in db.get('course_structure', {})})
     user.setdefault('points', 0)
     user.setdefault('last_seen', datetime.now().isoformat())
+    user.setdefault('badges', [])
+    user.setdefault('ctf_solves', 0)
     return user
 
 def check_flexible_answer(user_answer: str, correct_answers: list) -> bool:
@@ -319,11 +321,22 @@ async def _display_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         rank_str = f"#{rank}"
     except ValueError: rank_str = "Sin Ranking"
     completed_practices = sum(len(p) for p in user_data.get('progress', {}).values())
+    
     text = (f"👤 <b>Perfil de @{user_data.get('username', 'N/A')}</b>\n"
             f"🆔 <code>{user_id_to_show}</code>\n\n"
             f"🏆 <b>Puntos:</b> {user_data.get('points', 0)}\n"
             f"🌍 <b>Ranking Global:</b> {rank_str}\n"
-            f"✔️ <b>Prácticas Resueltas:</b> {completed_practices}")
+            f"✔️ <b>Prácticas Resueltas:</b> {completed_practices}\n\n"
+            "<b>Insignias:</b>\n")
+    
+    user_badges = user_data.get('badges', [])
+    if user_badges:
+        for badge_id in user_badges:
+            badge = ACHIEVEMENTS.get(badge_id, {})
+            text += f"{badge.get('emoji', '')} {badge.get('name', 'Desconocida')}\n"
+    else:
+        text += "<i>Aún no has ganado ninguna insignia.</i>"
+
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]])
     if hasattr(update, 'callback_query') and update.callback_query:
         await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -354,12 +367,14 @@ async def _display_daily_ctf(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ctf = db.get('daily_ctf', {})
     user_id_str = str(update.effective_user.id)
     today_str = datetime.now().strftime("%Y-%m-%d")
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]])
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("💡 Pedir Pista (-5 Puntos)", callback_data="ctf:hint")], [InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]])
     text = ""
     if ctf.get('date') != today_str or ctf.get('practice') == "No hay CTF activo.":
         text = "🤔 El CTF de hoy aún no ha sido publicado. ¡Vuelve más tarde!"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]])
     elif user_id_str in ctf.get('solvers', []):
         text = "¡Felicidades! Ya resolviste el CTF de hoy. Vuelve mañana para un nuevo reto."
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="menu:main")]])
     else:
         text = f"🔥 <b>CTF del Día ({today_str})</b>\n\n<b>Reto:</b>\n{ctf['practice']}\n\n"
         text += "Envía tu respuesta con el comando <code>/solve [tu_respuesta]</code>"
@@ -390,6 +405,42 @@ async def _display_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def _handle_achievement_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id_str = str(update.effective_user.id)
+    db = get_db()
+    user_data = db['users'][user_id_str]
+    user_badges = user_data.get('badges', [])
+
+    # Logro: Primera práctica
+    if 'first_steps' not in user_badges and len(user_data.get('progress', {}).values()) > 0:
+        user_badges.append('first_steps')
+        badge = ACHIEVEMENTS['first_steps']
+        await context.bot.send_message(chat_id=user_id_str, text=f"🎉 ¡Logro Desbloqueado! {badge['emoji']} <b>{badge['name']}</b>: {badge['description']}", parse_mode=ParseMode.HTML)
+
+    # Logro: Básico completado
+    if 'beginner_done' not in user_badges:
+        basico_lessons = db['course_structure']['basico']['lessons']
+        basico_progress = user_data.get('progress', {}).get('basico', [])
+        if all(lesson in basico_progress for lesson in basico_lessons):
+            user_badges.append('beginner_done')
+            badge = ACHIEVEMENTS['beginner_done']
+            await context.bot.send_message(chat_id=user_id_str, text=f"🎉 ¡Logro Desbloqueado! {badge['emoji']} <b>{badge['name']}</b>: {badge['description']}", parse_mode=ParseMode.HTML)
+
+    # Logro: Rey del CTF
+    if 'ctf_king' not in user_badges and user_data.get('ctf_solves', 0) >= 5:
+        user_badges.append('ctf_king')
+        badge = ACHIEVEMENTS['ctf_king']
+        await context.bot.send_message(chat_id=user_id_str, text=f"🎉 ¡Logro Desbloqueado! {badge['emoji']} <b>{badge['name']}</b>: {badge['description']}", parse_mode=ParseMode.HTML)
+    
+    # Logro: Acumulador de Puntos
+    if 'point_master' not in user_badges and user_data.get('points', 0) >= 1000:
+        user_badges.append('point_master')
+        badge = ACHIEVEMENTS['point_master']
+        await context.bot.send_message(chat_id=user_id_str, text=f"🎉 ¡Logro Desbloqueado! {badge['emoji']} <b>{badge['name']}</b>: {badge['description']}", parse_mode=ParseMode.HTML)
+
+    user_data['badges'] = user_badges
+    save_db(db)
+
 # ========= Comandos de Usuario (Wrappers) =========
 @check_maintenance
 @log_command_usage
@@ -398,11 +449,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = get_db()
     user_id_str = str(user.id)
     if user_id_str not in db.get("users", {}):
-        db["users"][user_id_str] = {"username": user.username or user.first_name, "join_date": datetime.now().strftime("%Y-%m-%d"), "progress": {level: [] for level in db.get('course_structure', {})}, "vip": False, "vip_expiry": None, "banned": False, "points": 0, "last_seen": datetime.now().isoformat()}
+        db["users"][user_id_str] = {"username": user.username or user.first_name, "join_date": datetime.now().strftime("%Y-%m-%d"), "progress": {level: [] for level in db.get('course_structure', {})}, "vip": False, "vip_expiry": None, "banned": False, "points": 0, "last_seen": datetime.now().isoformat(), "badges": [], "ctf_solves": 0}
         db["stats"]["total_users"] = db["stats"].get("total_users", 0) + 1
     else:
         db["users"][user_id_str]['last_seen'] = datetime.now().isoformat()
-        db["users"][user_id_str].setdefault('points', 0)
+        db["users"][user_id_str].setdefault('points', 0); db["users"][user_id_str].setdefault('badges', []); db["users"][user_id_str].setdefault('ctf_solves', 0)
     save_db(db)
     message = update.message or update.callback_query.message
     if db["users"][user_id_str].get("banned", False):
@@ -415,12 +466,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ("ℹ️ <b>Comandos Disponibles</b>\n\n"
             "<b>Generales:</b>\n"
-            "/start, /help, /profile, /redeem, /leaderboard, /daily_ctf, /solve, /feedback, /random\n\n"
+            "/start, /help, /profile, /redeem, /leaderboard, /daily_ctf, /solve, /feedback, /random, /pista\n\n"
             "<b>Herramientas Gratuitas:</b>\n"
             "/base64, /hash\n\n"
             "<b>Herramientas VIP 🔒:</b>\n"
-            "/url, /dns, /cve, /whois, /subdomains, /httpheaders, /portscan, /jwt_decode\n\n"
-            "Para mas ayuda escribe a @alvarito_y")
+            "/url, /dns, /cve, /whois, /subdomains, /httpheaders, /portscan, /jwt_decode")
     if update.effective_user.id == ADMIN_ID:
         text += ("\n\n<b>Admin:</b>\n"
                  "/admin, /key, /maintenance, /botstats, /add_lesson, /set_ctf")
@@ -473,22 +523,50 @@ async def daily_ctf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @log_command_usage
 async def solve_ctf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await update.message.reply_html("<b>Uso:</b> <code>/solve [respuesta]</code>")
-    user_answer, user_id_str, db, ctf = " ".join(context.args), str(update.effective_user.id), get_db(), db.get('daily_ctf', {})
+    user_answer, user_id_str = " ".join(context.args), str(update.effective_user.id)
+    db = get_db()
+    ctf = db.get('daily_ctf', {})
     if ctf.get('date') != datetime.now().strftime("%Y-%m-%d"): return await update.message.reply_text("El CTF de hoy ya no está activo.")
     if user_id_str in ctf.get('solvers', []): return await update.message.reply_text("Ya has resuelto el CTF de hoy.")
     if check_flexible_answer(user_answer, ctf.get('answer', [])):
-        db['users'][user_id_str]['points'] = db['users'][user_id_str].get('points', 0) + POINTS_PER_CTF
+        user_data = db['users'][user_id_str]
+        user_data['points'] = user_data.get('points', 0) + POINTS_PER_CTF
+        user_data['ctf_solves'] = user_data.get('ctf_solves', 0) + 1
         db['daily_ctf']['solvers'].append(user_id_str)
         save_db(db)
         await update.message.reply_html(f"🏆 ¡Correcto! Has resuelto el CTF y ganado <b>{POINTS_PER_CTF} puntos</b>.")
+        await _handle_achievement_unlock(update, context)
     else: await update.message.reply_html("❌ Respuesta incorrecta. ¡Sigue intentando!")
 
 @check_maintenance
 @log_command_usage
 async def feedback_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message or update.callback_query.message
-    await message.edit_text("Escribe tu feedback para el administrador @alvarito_y. Envía /cancel para anular.", reply_markup=None)
+    await message.edit_text("Escribe tu feedback para el administrador. Envía /cancel para anular.", reply_markup=None)
     return AWAITING_FEEDBACK
+
+@check_maintenance
+@log_command_usage
+async def hint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id_str = str(update.effective_user.id)
+    practice_info = context.user_data.get('current_practice')
+    if not practice_info:
+        return await update.message.reply_text("Debes estar resolviendo una práctica para pedir una pista.")
+    
+    db = get_db()
+    user_data = db['users'][user_id_str]
+    if user_data.get('points', 0) < POINTS_FOR_HINT:
+        return await update.message.reply_text(f"Necesitas al menos {POINTS_FOR_HINT} puntos para una pista. ¡Sigue aprendiendo!")
+    
+    lesson_id = practice_info['lesson_id']
+    hints = db.get('content', {}).get(lesson_id, {}).get('hints', [])
+    
+    if not hints:
+        return await update.message.reply_text("Esta práctica no tiene pistas disponibles.")
+    
+    user_data['points'] -= POINTS_FOR_HINT
+    save_db(db)
+    await update.message.reply_html(f"💡 <b>Pista:</b> {hints[0]}\n\nSe han restado {POINTS_FOR_HINT} puntos de tu total.")
 
 async def handle_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -514,6 +592,12 @@ async def cancel_conversation_generic(update: Update, context: ContextTypes.DEFA
         await _display_start_menu(update, context)
     return ConversationHandler.END
 
+# ... (El código completo continúa en la siguiente celda)
+Python
+
+# (Continuación del código v44.0)
+
+# --- Herramientas ---
 @check_maintenance
 @log_command_usage
 async def base64_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -974,7 +1058,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not lesson: return await query.message.edit_text("❌ Lección no encontrada.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data=f"level:{level_id}:{page}")]]))
         context.user_data['current_practice'] = {'level_id': level_id, 'lesson_id': lesson_id, 'page': page}
         text = (f"📗 <b>{lesson['title']}</b>\n\n<b>Teoría:</b>\n{lesson['theory']}\n\n{lesson['practice']}\n\n<i>Responde aquí. /cancel para salir.</i>")
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data=f"level:{level_id}:{page}")]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💡 Pedir Pista (-5 Puntos)", callback_data="practice:hint")], [InlineKeyboardButton("🔙 Volver", callback_data=f"level:{level_id}:{page}")]])
         await query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         return AWAITING_PRACTICE_ANSWER
     
@@ -1046,6 +1130,7 @@ async def handle_practice_answer(update: Update, context: ContextTypes.DEFAULT_T
             reply_text += "Ya habías resuelto esta práctica."
         save_db(db)
         await update.message.reply_html(reply_text)
+        await _handle_achievement_unlock(update, context) # Check for achievements
         
         all_lessons = db.get('course_structure', {}).get(level_id, {}).get('lessons', [])
         current_page = practice_info.get('page', 0)
@@ -1080,7 +1165,7 @@ def main():
     practice_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern='^practice:.*')],
         states={AWAITING_PRACTICE_ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_practice_answer)]},
-        fallbacks=[CommandHandler('cancel', cancel_conversation_generic)]
+        fallbacks=[CommandHandler('cancel', cancel_conversation_generic), CommandHandler("pista", hint_command)]
     )
     add_lesson_handler = ConversationHandler(
         entry_points=[CommandHandler('add_lesson', add_lesson_start_command, filters=admin_filter), CallbackQueryHandler(add_lesson_start_command, pattern='^admin:add_lesson$')],
@@ -1122,6 +1207,8 @@ def main():
     app.add_handler(CommandHandler("daily_ctf", daily_ctf_command))
     app.add_handler(CommandHandler("solve", solve_ctf_command))
     app.add_handler(CommandHandler("random", random_lesson_command))
+    app.add_handler(CommandHandler("pista", hint_command))
+    
     app.add_handler(CommandHandler("base64", base64_command))
     app.add_handler(CommandHandler("hash", hash_command))
     app.add_handler(CommandHandler("url", url_command))
@@ -1147,7 +1234,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("Iniciando CyberHub Academy Bot v35.0 - Edición Monolítica...")
+    logger.info("Iniciando CyberHub Academy Bot v53.0 - Edición Monolítica...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
